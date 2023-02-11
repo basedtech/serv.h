@@ -1,6 +1,12 @@
 #ifndef SERV_MAIN_H
 #define SERV_MAIN_H
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+#include <ctype.h>
+
 #define MAX_CONNECTION 500
 #define RESP_BUF_MAX 10000
 
@@ -14,11 +20,8 @@ enum ServErr {
 // Return a malloc'd buffer from this function, and set *length
 char *serv_recieve(char *url, int *length);
 
-#ifdef __linux__
+#ifndef WIN32
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
 #include <netdb.h>
 #include <signal.h>
@@ -106,6 +109,42 @@ int send_response(int fd, char *header, char *content_type, char *body, int cont
 	return rv;
 }
 
+char *serv_get_mime(char *url) {
+	char mime[32];
+	int c = 0;
+	while (*url != '.') {
+		url++;
+		if (*mime == '\0') {
+			return "text/html";
+		}
+	}
+
+	url++;
+
+	while (isalpha(*url)) {
+		mime[c] = *url;
+		c++;
+		url++;
+		if (mime[c] == '\0') break;
+	}
+
+	mime[c] = '\0';
+
+	if (!strcmp(mime, "js")) {
+		return "text/javascript";
+	} else if (!strcmp(mime, "xml")) {
+		return "image/svg+xml";
+	} else if (!strcmp(mime, "png")) {
+		return "image/png";
+	} else if (!strcmp(mime, "css")) {
+		return "text/css";
+	} else if (!strcmp(mime, "jpg")) {
+		return "image/jpeg";
+	} else {
+		return "text/html";
+	}
+}
+
 // client connection
 int respond(int n, int clients[MAX_CONNECTION]) {
 	char *resp = malloc(RESP_BUF_MAX);
@@ -155,29 +194,8 @@ int respond(int n, int clients[MAX_CONNECTION]) {
 		}
 	}
 
-	// Obtain mimetype by parsing URL
-	char *mime = resp;
-	while (*mime != '.') {
-		mime++;
-		if (*mime == '\0') {
-			mime = "text/html";
-			goto m1;
-		}
-	}
-
-	mime++;
-	m1:;
-	if (!strcmp(mime, "js")) {
-		mime = "text/javascript";
-	} else if (!strcmp(mime, "xml")) {
-		mime = "image/svg+xml";
-	} else if (!strcmp(mime, "png")) {
-		mime = "image/png";
-	} else if (!strcmp(mime, "css")) {
-		mime = "text/css";
-	} else if (!strcmp(mime, "jpg")) {
-		mime = "image/jpeg";
-	}
+	char *mime = serv_get_mime(resp);
+	printf("%s\n", mime);
 
 	int content_length = 0;
 	char *buffer = serv_recieve(url, &content_length);
@@ -241,6 +259,167 @@ int serv_start(int port) {
 
 	return 0;
 }
-#endif // ifdef __linux__
+#endif // ifndef WIN32
+
+#ifdef WIN32
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
+#include <windows.h>
+#include <http.h>
+#include <stdio.h>
+
+void InitHttpResponse(HTTP_RESPONSE *r, USHORT status, PSTR reason) {
+	RtlZeroMemory(r, sizeof(*r));
+	r->StatusCode = status;
+	r->pReason = reason;
+	r->ReasonLength = (USHORT)strlen(reason);
+}
+
+void AddKnownHeaders(HTTP_RESPONSE r, int id, PSTR str) {
+	r.Headers.KnownHeaders[id].pRawValue = str;
+	r.Headers.KnownHeaders[id].RawValueLength = (USHORT)strlen(str);
+}
+
+DWORD SendHttpResponse(HANDLE hReqQueue, PHTTP_REQUEST pRequest, USHORT StatusCode, PSTR pReason, PSTR pEntityString, int length) {
+	HTTP_RESPONSE response;
+	InitHttpResponse(&response, StatusCode, pReason);
+
+	char *mime = serv_get_mime(pRequest->CookedUrl.pAbsPath);
+
+	AddKnownHeaders(response, HttpHeaderContentType, "text/html");
+
+	HTTP_DATA_CHUNK dataChunk;
+	dataChunk.DataChunkType = HttpDataChunkFromMemory;
+	dataChunk.FromMemory.pBuffer = pEntityString;
+	dataChunk.FromMemory.BufferLength = (ULONG)length;
+
+	response.EntityChunkCount = 1;
+	response.pEntityChunks = &dataChunk;
+
+	DWORD bytesSent;
+	HRESULT r = HttpSendHttpResponse(
+		hReqQueue,
+		pRequest->RequestId,
+		0,
+		&response,
+		NULL,
+		&bytesSent,
+		NULL,
+		0,
+		NULL,
+		NULL
+	);
+
+	return r;
+}
+
+int SwitchHttpRequest(HANDLE hReqQueue, PHTTP_REQUEST pRequest) {
+	char path[256];
+	wcstombs(path, pRequest->CookedUrl.pAbsPath, sizeof(path));
+
+	int respCode = 0;
+	char *respReason = 0;
+
+	if (pRequest->Verb == HttpVerbGET) {
+		int length = 0;
+		char *content = serv_recieve(path, &length);
+
+		respCode = 200;
+		respReason = "OK";
+
+		if (content == NULL) {
+			respCode = 500;
+			respReason = "Internal Server Error";
+			content = respReason;
+			length = strlen(content);
+		} else if (length == SERV_ERR_404) {
+			respCode = 404;
+			respReason = "Not Found";
+			content = respReason;
+			length = strlen(content);			
+		} else if (length == 0) {
+			length = strlen(content);
+		}
+
+		HRESULT r = SendHttpResponse(
+			hReqQueue,
+			pRequest,
+			respCode,
+			respReason,
+			content,
+			length
+		);
+
+		free(content);
+	}
+}
+
+#define WIN_REQ_SIZE 100000
+
+int serv_start(int port) {
+	HTTPAPI_VERSION HttpApiVersion = HTTPAPI_VERSION_1;
+	HRESULT r = HttpInitialize(HttpApiVersion, HTTP_INITIALIZE_SERVER, NULL);
+	if (r != NO_ERROR) {
+		puts("Failed to initialize");
+		return 1;
+	}
+
+	HANDLE hReqQueue = NULL;
+	r = HttpCreateHttpHandle(&hReqQueue, 0);
+	if (r != NO_ERROR) {
+		puts("Failed to create handle");
+		return 1;
+	}
+
+	wchar_t url[128];
+	swprintf(url, sizeof(url), L"http://localhost:%d/", 1234);
+	r = HttpAddUrl(hReqQueue, url, NULL);
+	if (r != NO_ERROR) {
+		puts("Failed to add url");
+		return 1;
+	}
+
+	printf("Listening on %d\n", port);
+
+	PHTTP_REQUEST pRequest;
+	PCHAR pRequestBuffer;
+
+	pRequestBuffer = malloc(REQ_SIZE);
+
+	pRequest = (PHTTP_REQUEST)pRequestBuffer;
+
+	HTTP_REQUEST_ID requestId;
+	HTTP_SET_NULL_ID(&requestId);
+	DWORD bytesRead;
+	while (1) {
+		memset(pRequest, 0, REQ_SIZE);
+
+		r = HttpReceiveHttpRequest(
+			hReqQueue,
+			requestId,
+			0,
+			pRequest,
+			REQ_SIZE,
+			&bytesRead,
+			NULL
+		);
+
+		if (r == NO_ERROR) {
+			SwitchHttpRequest(hReqQueue, pRequest);
+		} else if (r == ERROR_MORE_DATA) {
+			puts("More data");
+		} else if (r == ERROR_CONNECTION_INVALID) {
+			puts("Invalid connection");
+		} else {
+			printf("Failed to recieve request: %d\n", r);
+			return 1;
+		}
+	}
+}
+
+#endif // ifdef WIN32
 
 #endif
