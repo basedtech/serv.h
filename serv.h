@@ -20,6 +20,42 @@ enum ServErr {
 // Return a malloc'd buffer from this function, and set *length
 char *serv_recieve(char *url, int *length);
 
+char *serv_get_mime(char *url) {
+	char mime[32];
+	int c = 0;
+	while (*url != '.') {
+		url++;
+		if (*mime == '\0') {
+			return "text/html";
+		}
+	}
+
+	url++;
+
+	while (isalpha(*url)) {
+		mime[c] = *url;
+		c++;
+		url++;
+		if (mime[c] == '\0') break;
+	}
+
+	mime[c] = '\0';
+
+	if (!strcmp(mime, "js")) {
+		return "text/javascript";
+	} else if (!strcmp(mime, "xml")) {
+		return "image/svg+xml";
+	} else if (!strcmp(mime, "png")) {
+		return "image/png";
+	} else if (!strcmp(mime, "css")) {
+		return "text/css";
+	} else if (!strcmp(mime, "jpg")) {
+		return "image/jpeg";
+	} else {
+		return "text/html";
+	}
+}
+
 #ifndef WIN32
 
 #include <unistd.h>
@@ -107,42 +143,6 @@ int send_response(int fd, char *header, char *content_type, char *body, int cont
 	}
 
 	return rv;
-}
-
-char *serv_get_mime(char *url) {
-	char mime[32];
-	int c = 0;
-	while (*url != '.') {
-		url++;
-		if (*mime == '\0') {
-			return "text/html";
-		}
-	}
-
-	url++;
-
-	while (isalpha(*url)) {
-		mime[c] = *url;
-		c++;
-		url++;
-		if (mime[c] == '\0') break;
-	}
-
-	mime[c] = '\0';
-
-	if (!strcmp(mime, "js")) {
-		return "text/javascript";
-	} else if (!strcmp(mime, "xml")) {
-		return "image/svg+xml";
-	} else if (!strcmp(mime, "png")) {
-		return "image/png";
-	} else if (!strcmp(mime, "css")) {
-		return "text/css";
-	} else if (!strcmp(mime, "jpg")) {
-		return "image/jpeg";
-	} else {
-		return "text/html";
-	}
 }
 
 // client connection
@@ -287,7 +287,7 @@ DWORD SendHttpResponse(HANDLE hReqQueue, PHTTP_REQUEST pRequest, USHORT StatusCo
 	HTTP_RESPONSE response;
 	InitHttpResponse(&response, StatusCode, pReason);
 
-	char *mime = serv_get_mime(pRequest->CookedUrl.pAbsPath);
+	char *mime = serv_get_mime((char *)pRequest->CookedUrl.pAbsPath);
 
 	AddKnownHeaders(response, HttpHeaderContentType, "text/html");
 
@@ -377,17 +377,19 @@ int serv_start(int port) {
 	wchar_t url[128];
 	swprintf(url, sizeof(url), L"http://localhost:%d/", 1234);
 	r = HttpAddUrl(hReqQueue, url, NULL);
+	swprintf(url, sizeof(url), L"http://127.0.0.1:%d/", 1234);
+	r = HttpAddUrl(hReqQueue, url, NULL);
 	if (r != NO_ERROR) {
 		puts("Failed to add url");
 		return 1;
 	}
 
-	printf("Listening on %d\n", port);
+	printf("Listening on http://127.0.0.1:%d/\n", port);
 
 	PHTTP_REQUEST pRequest;
 	PCHAR pRequestBuffer;
 
-	pRequestBuffer = malloc(REQ_SIZE);
+	pRequestBuffer = malloc(WIN_REQ_SIZE);
 
 	pRequest = (PHTTP_REQUEST)pRequestBuffer;
 
@@ -395,14 +397,14 @@ int serv_start(int port) {
 	HTTP_SET_NULL_ID(&requestId);
 	DWORD bytesRead;
 	while (1) {
-		memset(pRequest, 0, REQ_SIZE);
+		memset(pRequest, 0, WIN_REQ_SIZE);
 
 		r = HttpReceiveHttpRequest(
 			hReqQueue,
 			requestId,
 			0,
 			pRequest,
-			REQ_SIZE,
+			WIN_REQ_SIZE,
 			&bytesRead,
 			NULL
 		);
