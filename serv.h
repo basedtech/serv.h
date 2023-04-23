@@ -6,6 +6,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <pthread.h>
 
 #define MAX_CONNECTION 500
 #define RESP_BUF_MAX 10000
@@ -17,28 +18,28 @@ enum ServErr {
 	SERV_ERR_500 = -2,
 };
 
-// Return a malloc'd buffer from this function, and set *length
-char *serv_recieve(char *url, int *length);
+// Return a allocated buffer from this function, and set *length
+char *serv_recieve(char *url, int *length, int *allocated);
 
 char *serv_get_mime(char *url) {
 	char mime[32];
-	int c = 0;
 	while (*url != '.') {
-		url++;
-		if (*mime == '\0') {
+		if (*url == '\0') {
 			return "text/html";
 		}
+		url++;
 	}
 
 	url++;
 
+	int c = 0;
 	while (isalpha(*url)) {
 		mime[c] = *url;
 		c++;
 		url++;
-		if (mime[c] == '\0') break;
+		if (*url == '\0') break;
+		if (c >= (int)sizeof(mime)) break;
 	}
-
 	mime[c] = '\0';
 
 	if (!strcmp(mime, "js")) {
@@ -51,11 +52,14 @@ char *serv_get_mime(char *url) {
 		return "text/css";
 	} else if (!strcmp(mime, "jpg")) {
 		return "image/jpeg";
+	} else if (!strcmp(mime, "ico")) {
+		return "image/x-icon";
 	} else {
 		return "text/html";
 	}
 }
 
+// If we are on a UNIX based system
 #ifndef WIN32
 
 #include <unistd.h>
@@ -68,7 +72,9 @@ int serv_init(int port, int *listenfd) {
 	char port_s[16];
 	snprintf(port_s, 16, "%u", port);
 
-	printf("Starting on http://127.0.0.1:%s\n", port_s);
+	printf("Starting on http://127.0.0.1:%s/\n", port_s);
+	printf("Open that link in your browser. The link is only available on your\n"
+		"computer, and ceases to exist once you exit this application (Ctrl + C)\n");
 
 	struct addrinfo hints, *res;
 
@@ -119,7 +125,7 @@ int send_response(int fd, char *header, char *content_type, char *body, int cont
 		header = "HTTP/1.1 404 OK";
 	}
 
-	// Detect JPEG data (if not already detected)
+	// Detect JPEG magic (if not already detected)
 	if (body[0] == (char)0xFF && body[1] == (char)0xD8) {
 		content_type = "image/jpeg";
 	}
@@ -195,10 +201,10 @@ int respond(int n, int clients[MAX_CONNECTION]) {
 	}
 
 	char *mime = serv_get_mime(resp);
-	printf("%s\n", mime);
 
 	int content_length = 0;
-	char *buffer = serv_recieve(url, &content_length);
+	int allocated = 1;
+	char *buffer = serv_recieve(url, &content_length, &allocated);
 	if (buffer == NULL) {
 		buffer = "Internal server error";
 		content_length = strlen(buffer);
@@ -217,7 +223,9 @@ int respond(int n, int clients[MAX_CONNECTION]) {
 	}
 
 	free(resp);
-	free(buffer);
+	if (allocated) {
+		free(buffer);
+	}
 
 	return 0;
 }
@@ -259,6 +267,69 @@ int serv_start(int port) {
 
 	return 0;
 }
+
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
+
+int window_server(void *(*server)(void *)) {
+	Display *d = XOpenDisplay(NULL);
+	if (d == NULL) {
+		fprintf(stderr, "Cannot open display\n");
+		return 1;
+	}
+
+	int s = DefaultScreen(d);
+
+	XSizeHints myhint;
+	myhint.x = 300;
+	myhint.y = 300;
+	myhint.width = 350;
+	myhint.height = 250;
+	myhint.flags = PPosition|PSize;
+
+	Window w = XCreateSimpleWindow(d, RootWindow(d, s),
+		myhint.x, myhint.y,
+		myhint.width, myhint.height,
+		5, BlackPixel(d, s), WhitePixel(d, s));
+
+	XSetStandardProperties(d, w, "Window", "Testing",
+		None, NULL, 0, &myhint);
+
+	XSelectInput(d, w, ExposureMask | KeyPressMask | StructureNotifyMask);
+	XMapWindow(d, w);
+
+	pthread_t thread;
+
+	if (pthread_create(&thread, NULL, server, NULL)) {
+		return 1;
+	}
+
+	if (pthread_join(thread, NULL)) {
+		return 1;
+	}
+
+	XEvent e;
+	while (1) {
+		XNextEvent(d, &e);
+		if (e.type == DestroyNotify) {
+			printf("Killed backend thread");
+			pthread_cancel(thread);
+			return 1;
+		}
+		if (e.type == Expose) {
+			char *msg = "CamControl";
+			//XFillRectangle(d, w, DefaultGC(d, s), 20, 20, 10, 10);
+			XDrawString(d, w, DefaultGC(d, s), 10, 20, msg, strlen(msg));
+		}
+		if (e.type == KeyPress) {
+			printf("Hello\n");
+		}
+	}
+
+	XCloseDisplay(d);
+	return 0;
+}
+
 #endif // ifndef WIN32
 
 #ifdef WIN32
@@ -270,6 +341,28 @@ int serv_start(int port) {
 #include <windows.h>
 #include <http.h>
 #include <stdio.h>
+
+char *serv_return_file(char *filename, int *length) {
+	HANDLE *f = CreateFileA(filename, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, NULL);
+	if (f == INVALID_HANDLE_VALUE) {
+		return NULL;
+	}
+
+	LARGE_INTEGER size;
+	if (GetFileSizeEx(f, &size) == 0) {
+		return NULL;
+	}
+
+	char *buffer = malloc((int)size.LowPart);
+
+	OVERLAPPED ol = {0};
+	ReadFileEx(f, buffer, (int)size.LowPart, &ol, NULL);
+
+	printf("Size: %s\n", buffer);
+
+	CloseHandle(f);
+	return buffer;
+}
 
 void InitHttpResponse(HTTP_RESPONSE *r, USHORT status, PSTR reason) {
 	RtlZeroMemory(r, sizeof(*r));
@@ -287,9 +380,11 @@ DWORD SendHttpResponse(HANDLE hReqQueue, PHTTP_REQUEST pRequest, USHORT StatusCo
 	HTTP_RESPONSE response;
 	InitHttpResponse(&response, StatusCode, pReason);
 
-	char *mime = serv_get_mime((char *)pRequest->CookedUrl.pAbsPath);
+	char path[256];
+	wcstombs(path, pRequest->CookedUrl.pAbsPath, sizeof(path));
 
-	AddKnownHeaders(response, HttpHeaderContentType, "text/html");
+	char *mime = serv_get_mime(path);
+	AddKnownHeaders(response, HttpHeaderContentType, mime);
 
 	HTTP_DATA_CHUNK dataChunk;
 	dataChunk.DataChunkType = HttpDataChunkFromMemory;
@@ -324,7 +419,7 @@ int SwitchHttpRequest(HANDLE hReqQueue, PHTTP_REQUEST pRequest) {
 	char *respReason = 0;
 
 	if (pRequest->Verb == HttpVerbGET) {
-		int length = 0;
+		int length = -1;
 		char *content = serv_recieve(path, &length);
 
 		respCode = 200;
@@ -338,6 +433,11 @@ int SwitchHttpRequest(HANDLE hReqQueue, PHTTP_REQUEST pRequest) {
 		} else if (length == SERV_ERR_404) {
 			respCode = 404;
 			respReason = "Not Found";
+			content = respReason;
+			length = strlen(content);			
+		} else if (length < 0) {
+			respCode = 500;
+			respReason = "Internal Server Error";
 			content = respReason;
 			length = strlen(content);			
 		} else if (length == 0) {
