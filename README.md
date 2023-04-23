@@ -1,14 +1,16 @@
-# serv.h
-Single Header Web Server Library
+# Desktop Web App Library
+- This is a "more practical" replacement for frameworks like Electron, Webview, and Tauri
+- Instead of opening a new browser instance (which uses a lot of RAM), this library starts a HTTP web
+server that allows communication with a C backend.
+- The user is given a link to open in their favorite browser.
 
-I initially wrote this for a Linux app I'm working on, but I think it might be useful for a few people.
-This is written as an alternative to libraries such as electron, webview, and tauri. Instead of hooking to
-a browser process, or packing an entire browser in the binary, this lib just starts a HTTP server, and allows
-the user to open the link in their favorite browser.
-Please note, this is not for every piece of software, choose what works best for you.
+Currently, this library is in development and not intended for use in software yet.
 
 ### Future plans
 - [x] Support Linux
-- [ ] Support Windows
+- [x] Support Windows
+- [ ] Implement better/faster bindings
 - [ ] Parse POST requests
-- [ ] A better solution for 'bindings'
+- [ ] Open a small window when running the app with instructions
+
+Copyright (C) by Based Technologies - Published under MIT License
