@@ -271,7 +271,16 @@ int serv_start(int port) {
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 
-int window_server(void *(*server)(void *)) {
+int window_server(void *(*server)(), char *title, char *text, char *link) {
+	pthread_t thread;
+	if (pthread_create(&thread, NULL, server, NULL)) {
+		return 1;
+	}
+
+	if (pthread_detach(thread)) {
+		return 1;
+	}
+
 	Display *d = XOpenDisplay(NULL);
 	if (d == NULL) {
 		fprintf(stderr, "Cannot open display\n");
@@ -292,41 +301,39 @@ int window_server(void *(*server)(void *)) {
 		myhint.width, myhint.height,
 		5, BlackPixel(d, s), WhitePixel(d, s));
 
-	XSetStandardProperties(d, w, "Window", "Testing",
+	XSetStandardProperties(d, w, title, title,
 		None, NULL, 0, &myhint);
 
-	XSelectInput(d, w, ExposureMask | KeyPressMask | StructureNotifyMask);
+	XSelectInput(d, w, ExposureMask | StructureNotifyMask | ButtonPressMask);
 	XMapWindow(d, w);
 
-	pthread_t thread;
-
-	if (pthread_create(&thread, NULL, server, NULL)) {
-		return 1;
-	}
-
-	if (pthread_join(thread, NULL)) {
-		return 1;
-	}
+	Atom wm_delete_window = XInternAtom(d, "WM_DELETE_WINDOW", 0);
+	XSetWMProtocols(d, w, &wm_delete_window, 1);
 
 	XEvent e;
 	while (1) {
 		XNextEvent(d, &e);
-		if (e.type == DestroyNotify) {
-			printf("Killed backend thread");
-			pthread_cancel(thread);
-			return 1;
-		}
-		if (e.type == Expose) {
-			char *msg = "CamControl";
-			//XFillRectangle(d, w, DefaultGC(d, s), 20, 20, 10, 10);
-			XDrawString(d, w, DefaultGC(d, s), 10, 20, msg, strlen(msg));
-		}
-		if (e.type == KeyPress) {
-			printf("Hello\n");
+		if (e.type == ClientMessage) {
+			if (e.xclient.message_type == XInternAtom(d, "WM_PROTOCOLS", True) &&
+				(Atom)e.xclient.data.l[0] == XInternAtom(d, "WM_DELETE_WINDOW", True)) {
+				printf("Window closed!\n");
+				pthread_cancel(thread);
+				XCloseDisplay(d);
+			}
+
+			return 0;
+		} else if (e.type == Expose) {
+			XDrawString(d, w, DefaultGC(d, s), 10, 20, text, strlen(text));
+			char instructions[] = "Click on this window to open the app in your browser.";
+			XDrawString(d, w, DefaultGC(d, s), 10, 40, instructions, strlen(instructions));
+		} else if (e.type == ButtonPress) {
+			char buffer[128];
+			snprintf(buffer, sizeof(buffer), "/bin/xdg-open %s\n", link);
+			system(buffer);
+			XDrawString(d, w, DefaultGC(d, s), 10, 60, "...", strlen("..."));
 		}
 	}
 
-	XCloseDisplay(d);
 	return 0;
 }
 
