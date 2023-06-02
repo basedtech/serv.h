@@ -427,7 +427,8 @@ int SwitchHttpRequest(HANDLE hReqQueue, PHTTP_REQUEST pRequest) {
 
 	if (pRequest->Verb == HttpVerbGET) {
 		int length = -1;
-		char *content = serv_recieve(path, &length);
+		int allocated = 1;
+		char *content = serv_recieve(path, &length, &allocated);
 
 		respCode = 200;
 		respReason = "OK";
@@ -459,6 +460,10 @@ int SwitchHttpRequest(HANDLE hReqQueue, PHTTP_REQUEST pRequest) {
 			content,
 			length
 		);
+
+		if (allocated) {
+			free(content);
+		}
 
 		free(content);
 	}
@@ -528,6 +533,91 @@ int serv_start(int port) {
 		}
 	}
 }
+
+#include <windows.h>
+#include <shellapi.h>
+
+struct ServDummyData {
+	char *text;
+	char *link;
+	HANDLE thread;
+};
+
+LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+	struct ServDummyData *data = (struct ServDummyData *)(GetWindowLongPtr(hWnd, GWLP_USERDATA));
+	switch (msg) {
+	case WM_DESTROY:
+		TerminateThread(data->thread, 0);
+		PostQuitMessage(0);
+		return 0;
+	case WM_PAINT: {
+		PAINTSTRUCT ps;
+		HDC hdc = BeginPaint(hWnd, &ps);
+
+		TextOut(hdc, 10, 20, data->text, strlen(data->text));
+		TextOut(hdc, 10, 40, "Click on this window to open the app in your browser.", 53);
+
+		EndPaint(hWnd, &ps);
+		return 0;
+		}
+	case WM_LBUTTONDOWN: {
+		char *link = (char*)GetWindowLongPtr(hWnd, GWLP_USERDATA) + sizeof(char *);
+		puts(data->link);
+		ShellExecuteA(0, "open", data->link, 0, 0 , SW_SHOWNORMAL);
+		return 0;
+		}
+	}
+
+	return DefWindowProc(hWnd, msg, wParam, lParam);
+}
+
+int window_server(void* (*server)(), char* title, char* text, char* link) {
+	HANDLE thread = CreateThread(NULL, 0, server, NULL, 0, NULL);
+
+    HINSTANCE hInstance = GetModuleHandle(NULL);
+
+    WNDCLASSEX wc = { sizeof(WNDCLASSEX) };
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = WndProc;
+    wc.hInstance = hInstance;
+	wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+	wc.lpszClassName = "WindowClass";
+
+	if (!RegisterClassEx(&wc)) {
+		MessageBox(NULL, "Window Registration Failed!", "Error", MB_ICONEXCLAMATION | MB_OK);
+		return 1;
+	}
+
+	HWND hWnd = CreateWindowEx(
+		0, "WindowClass", title, WS_OVERLAPPEDWINDOW,
+		CW_USEDEFAULT, CW_USEDEFAULT, 400, 300,
+		NULL, NULL, hInstance, NULL
+	);
+
+	if (hWnd == NULL) {
+		MessageBox(NULL, "Window Creation Failed!", "Error", MB_ICONEXCLAMATION | MB_OK);
+		return 1;
+	}
+
+	struct ServDummyData data;
+	data.text = text;
+	data.link = link;
+	data.thread = thread;
+
+	SetWindowLongPtr(hWnd, GWLP_USERDATA, (LONG_PTR)&data);
+
+	ShowWindow(hWnd, SW_SHOW);
+	UpdateWindow(hWnd);
+
+	MSG msg;
+	while (GetMessage(&msg, NULL, 0, 0)) {
+		TranslateMessage(&msg);
+		DispatchMessage(&msg);
+	}
+
+	return 0;
+}
+
 
 #endif // ifdef WIN32
 
